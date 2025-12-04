@@ -1,9 +1,14 @@
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+
+// For Vercel, use /tmp directory (writable), otherwise use uploads directory
+const uploadsDir = process.env.VERCEL 
+  ? path.join(os.tmpdir(), 'uploads')
+  : path.join(__dirname, '../uploads');
 
 // Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
