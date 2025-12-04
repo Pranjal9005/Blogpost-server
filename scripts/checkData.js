@@ -1,34 +1,36 @@
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
 require('dotenv').config();
 
 async function checkData() {
-  let connection;
+  let pool;
   
   try {
-    // Parse DATABASE_URL
-    const url = new URL(process.env.DATABASE_URL.replace('mysql://', 'http://'));
-    
-    connection = await mysql.createConnection({
-      host: url.hostname,
-      port: parseInt(url.port) || 3306,
-      user: decodeURIComponent(url.username),
-      password: decodeURIComponent(url.password || ''),
-      database: url.pathname.slice(1)
+    if (!process.env.DATABASE_URL) {
+      console.error('❌ ERROR: DATABASE_URL is not set in .env file');
+      process.exit(1);
+    }
+
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL.includes('sslmode=require') ? { rejectUnauthorized: false } : false
     });
 
-    console.log('🔌 Connected to MySQL database\n');
+    console.log('🔌 Connected to PostgreSQL database\n');
     console.log('='.repeat(60));
     console.log('DATABASE INFORMATION');
     console.log('='.repeat(60));
+    
+    const url = new URL(process.env.DATABASE_URL);
     console.log(`Database: ${url.pathname.slice(1)}`);
-    console.log(`Host: ${url.hostname}:${url.port}`);
+    console.log(`Host: ${url.hostname}:${url.port || 5432}`);
     console.log(`User: ${url.username}\n`);
 
     // Check users
     console.log('='.repeat(60));
     console.log('USERS TABLE');
     console.log('='.repeat(60));
-    const [users] = await connection.query('SELECT id, username, email, created_at FROM users');
+    const usersResult = await pool.query('SELECT id, username, email, created_at FROM users');
+    const users = usersResult.rows;
     
     if (users.length === 0) {
       console.log('❌ No users found in the database\n');
@@ -47,7 +49,7 @@ async function checkData() {
     console.log('='.repeat(60));
     console.log('POSTS TABLE');
     console.log('='.repeat(60));
-    const [posts] = await connection.query(`
+    const postsResult = await pool.query(`
       SELECT 
         p.id, 
         p.title, 
@@ -60,6 +62,7 @@ async function checkData() {
       LEFT JOIN users u ON p.author_id = u.id
       ORDER BY p.created_at DESC
     `);
+    const posts = postsResult.rows;
     
     if (posts.length === 0) {
       console.log('❌ No posts found in the database\n');
@@ -81,17 +84,17 @@ async function checkData() {
     console.log('SUMMARY STATISTICS');
     console.log('='.repeat(60));
     
-    const [userCount] = await connection.query('SELECT COUNT(*) as count FROM users');
-    const [postCount] = await connection.query('SELECT COUNT(*) as count FROM posts');
-    const [latestPost] = await connection.query(`
+    const userCountResult = await pool.query('SELECT COUNT(*) as count FROM users');
+    const postCountResult = await pool.query('SELECT COUNT(*) as count FROM posts');
+    const latestPostResult = await pool.query(`
       SELECT title, created_at FROM posts ORDER BY created_at DESC LIMIT 1
     `);
     
-    console.log(`Total Users: ${userCount[0].count}`);
-    console.log(`Total Posts: ${postCount[0].count}`);
-    if (latestPost.length > 0) {
-      console.log(`Latest Post: "${latestPost[0].title}"`);
-      console.log(`Posted: ${latestPost[0].created_at}`);
+    console.log(`Total Users: ${userCountResult.rows[0].count}`);
+    console.log(`Total Posts: ${postCountResult.rows[0].count}`);
+    if (latestPostResult.rows.length > 0) {
+      console.log(`Latest Post: "${latestPostResult.rows[0].title}"`);
+      console.log(`Posted: ${latestPostResult.rows[0].created_at}`);
     }
     console.log('='.repeat(60));
 
@@ -99,13 +102,11 @@ async function checkData() {
     console.error('❌ Error checking data:', error.message);
     process.exit(1);
   } finally {
-    if (connection) {
-      await connection.end();
+    if (pool) {
+      await pool.end();
       console.log('\n🔌 Database connection closed\n');
     }
   }
 }
 
 checkData();
-
-

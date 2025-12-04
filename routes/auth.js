@@ -20,31 +20,25 @@ router.post('/signup', async (req, res) => {
     }
 
     // Check if user already exists
-    const [userCheck] = await pool.query(
-      'SELECT id FROM users WHERE username = ? OR email = ?',
+    const userCheck = await pool.query(
+      'SELECT id FROM users WHERE username = $1 OR email = $2',
       [username, email]
     );
 
-    if (userCheck.length > 0) {
+    if (userCheck.rows.length > 0) {
       return res.status(409).json({ error: 'Username or email already exists' });
     }
 
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create user
-    const [result] = await pool.query(
-      'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
+    // Create user and return the created user
+    const result = await pool.query(
+      'INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id, username, email, profile_picture_url, bio',
       [username, email, hashedPassword]
     );
 
-    // Get the created user
-    const [userRows] = await pool.query(
-      'SELECT id, username, email FROM users WHERE id = ?',
-      [result.insertId]
-    );
-
-    const user = userRows[0];
+    const user = result.rows[0];
 
     // Generate JWT token
     const token = jwt.sign(
@@ -59,7 +53,9 @@ router.post('/signup', async (req, res) => {
       user: {
         id: user.id,
         username: user.username,
-        email: user.email
+        email: user.email,
+        profile_picture_url: user.profile_picture_url,
+        bio: user.bio
       }
     });
   } catch (error) {
@@ -79,16 +75,16 @@ router.post('/login', async (req, res) => {
     }
 
     // Find user
-    const [result] = await pool.query(
-      'SELECT id, username, email, password FROM users WHERE email = ?',
+    const result = await pool.query(
+      'SELECT id, username, email, password, profile_picture_url, bio FROM users WHERE email = $1',
       [email]
     );
 
-    if (result.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    const user = result[0];
+    const user = result.rows[0];
 
     // Verify password
     const isValidPassword = await bcrypt.compare(password, user.password);
@@ -110,7 +106,9 @@ router.post('/login', async (req, res) => {
       user: {
         id: user.id,
         username: user.username,
-        email: user.email
+        email: user.email,
+        profile_picture_url: user.profile_picture_url,
+        bio: user.bio
       }
     });
   } catch (error) {

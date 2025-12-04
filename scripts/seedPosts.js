@@ -1,4 +1,4 @@
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
 require('dotenv').config();
 
 // Sample blog posts data
@@ -139,35 +139,35 @@ Proper indexing is one of the easiest ways to improve database performance witho
 ];
 
 async function seedPosts() {
-  let connection;
+  let pool;
   
   try {
-    // Parse DATABASE_URL
-    const url = new URL(process.env.DATABASE_URL.replace('mysql://', 'http://'));
-    
-    connection = await mysql.createConnection({
-      host: url.hostname,
-      port: parseInt(url.port) || 3306,
-      user: decodeURIComponent(url.username),
-      password: decodeURIComponent(url.password || ''),
-      database: url.pathname.slice(1)
+    if (!process.env.DATABASE_URL) {
+      console.error('❌ ERROR: DATABASE_URL is not set in .env file');
+      process.exit(1);
+    }
+
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL.includes('sslmode=require') ? { rejectUnauthorized: false } : false
     });
 
-    console.log('🔌 Connected to MySQL database');
+    console.log('🔌 Connected to PostgreSQL database');
 
     // Check if users table exists and has users
-    const [users] = await connection.query('SELECT id, username FROM users LIMIT 1');
+    const usersResult = await pool.query('SELECT id, username FROM users LIMIT 1');
+    const users = usersResult.rows;
     
     let authorId;
     
     if (users.length === 0) {
       // Create a test user
       console.log('📝 Creating test user...');
-      const [result] = await connection.query(
-        'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
+      const result = await pool.query(
+        'INSERT INTO users (username, email, password) VALUES ($1, $2, $3) RETURNING id',
         ['testuser', 'test@example.com', '$2a$10$dummyhashedpassword'] // Dummy hash for seeding
       );
-      authorId = result.insertId;
+      authorId = result.rows[0].id;
       console.log(`✅ Created test user with ID: ${authorId}`);
     } else {
       authorId = users[0].id;
@@ -175,18 +175,18 @@ async function seedPosts() {
     }
 
     // Check if posts already exist
-    const [existingPosts] = await connection.query('SELECT COUNT(*) as count FROM posts');
+    const existingPostsResult = await pool.query('SELECT COUNT(*) as count FROM posts');
     
-    if (parseInt(existingPosts[0].count) > 0) {
-      console.log(`⚠️  Found ${existingPosts[0].count} existing posts. Adding more sample posts...`);
+    if (parseInt(existingPostsResult.rows[0].count) > 0) {
+      console.log(`⚠️  Found ${existingPostsResult.rows[0].count} existing posts. Adding more sample posts...`);
     }
 
     // Insert sample posts
     console.log('📝 Inserting sample blog posts...');
     
     for (const post of samplePosts) {
-      await connection.query(
-        'INSERT INTO posts (title, content, author_id) VALUES (?, ?, ?)',
+      await pool.query(
+        'INSERT INTO posts (title, content, author_id) VALUES ($1, $2, $3)',
         [post.title, post.content, authorId]
       );
     }
@@ -194,15 +194,15 @@ async function seedPosts() {
     console.log(`✅ Successfully inserted ${samplePosts.length} sample blog posts!`);
     
     // Show summary
-    const [totalPosts] = await connection.query('SELECT COUNT(*) as count FROM posts');
-    console.log(`\n📊 Total posts in database: ${totalPosts[0].count}`);
+    const totalPostsResult = await pool.query('SELECT COUNT(*) as count FROM posts');
+    console.log(`\n📊 Total posts in database: ${totalPostsResult.rows[0].count}`);
     
-    const [recentPosts] = await connection.query(
+    const recentPostsResult = await pool.query(
       'SELECT id, title, created_at FROM posts ORDER BY created_at DESC LIMIT 5'
     );
     
     console.log('\n📋 Recent posts:');
-    recentPosts.forEach((post, index) => {
+    recentPostsResult.rows.forEach((post, index) => {
       console.log(`   ${index + 1}. ${post.title} (ID: ${post.id})`);
     });
 
@@ -210,8 +210,8 @@ async function seedPosts() {
     console.error('❌ Error seeding posts:', error.message);
     process.exit(1);
   } finally {
-    if (connection) {
-      await connection.end();
+    if (pool) {
+      await pool.end();
       console.log('\n🔌 Database connection closed');
     }
   }
@@ -219,5 +219,3 @@ async function seedPosts() {
 
 // Run the seeding function
 seedPosts();
-
-

@@ -1,4 +1,4 @@
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
 require('dotenv').config();
 
 // Check if DATABASE_URL is set
@@ -6,37 +6,27 @@ if (!process.env.DATABASE_URL) {
   console.error('\n❌ ERROR: DATABASE_URL is not set in .env file');
   console.error('Please create a .env file with your database connection string.');
   console.error('Example:');
-  console.error('  DATABASE_URL=mysql://root:password@127.0.0.1:3306/wordnest');
+  console.error('  DATABASE_URL=postgresql://user:password@host:port/database');
   console.error('  Or use separate config variables (see below)\n');
   process.exit(1);
 }
 
-// Parse DATABASE_URL
-// Format: mysql://user:password@host:port/database
-// Note: Special characters in password should be URL-encoded (e.g., @ becomes %40, # becomes %23)
-let poolConfig;
-try {
-  const url = new URL(process.env.DATABASE_URL.replace('mysql://', 'http://'));
-  poolConfig = {
-    host: url.hostname,
-    port: parseInt(url.port) || 3306,
-    user: decodeURIComponent(url.username),
-    password: decodeURIComponent(url.password || ''),
-    database: url.pathname.slice(1), // Remove leading /
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-  };
-  
-  // Debug log (remove password before logging)
-  console.log(`🔌 Connecting to MySQL: ${poolConfig.user}@${poolConfig.host}:${poolConfig.port}/${poolConfig.database}`);
-} catch (error) {
-  console.error('❌ Error parsing DATABASE_URL:', error.message);
-  console.error('Please check your DATABASE_URL format: mysql://username:password@host:port/database');
-  process.exit(1);
-}
+// Create PostgreSQL connection pool
+// PostgreSQL connection string format: postgresql://user:password@host:port/database?sslmode=require
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL.includes('sslmode=require') ? { rejectUnauthorized: false } : false
+});
 
-const pool = mysql.createPool(poolConfig);
+// Test connection
+pool.on('connect', () => {
+  console.log('🔌 Connected to PostgreSQL database');
+});
+
+pool.on('error', (err) => {
+  console.error('❌ Unexpected error on idle PostgreSQL client', err);
+  process.exit(-1);
+});
 
 // Initialize database tables
 const initializeDatabase = async () => {
@@ -44,71 +34,107 @@ const initializeDatabase = async () => {
     // Create users table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         username VARCHAR(50) UNIQUE NOT NULL,
         email VARCHAR(100) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
+        profile_picture_url VARCHAR(500),
+        bio TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
+    // Add profile fields if they don't exist (for existing databases)
+    try {
+      await pool.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_picture_url VARCHAR(500)
+      `);
+    } catch (error) {
+      if (error.code !== '42701') {
+        console.log('Note: profile_picture_url column may already exist');
+      }
+    }
+
+    try {
+      await pool.query(`
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT
+      `);
+    } catch (error) {
+      if (error.code !== '42701') {
+        console.log('Note: bio column may already exist');
+      }
+    }
+
     // Create posts table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS posts (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         title VARCHAR(255) NOT NULL,
         content TEXT NOT NULL,
-        author_id INT NOT NULL,
+        image_url VARCHAR(500),
+        author_id INTEGER NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
 
-    // Create index on author_id for better query performance (MySQL doesn't support IF NOT EXISTS for indexes)
+    // Add image_url column if it doesn't exist (for existing databases)
     try {
-      const [indexCheck] = await pool.query(`
-        SELECT COUNT(*) as count 
-        FROM information_schema.statistics 
-        WHERE table_schema = DATABASE() 
-        AND table_name = 'posts' 
-        AND index_name = 'idx_posts_author_id'
+      await pool.query(`
+        ALTER TABLE posts ADD COLUMN IF NOT EXISTS image_url VARCHAR(500)
       `);
-      
-      if (indexCheck[0].count === 0) {
-        await pool.query(`
-          CREATE INDEX idx_posts_author_id ON posts(author_id)
-        `);
-      }
     } catch (error) {
-      // Index might already exist, ignore error
-      console.log('Index creation skipped (may already exist)');
+      // Column might already exist, ignore error
+      if (error.code !== '42701') { // 42701 is "duplicate_column" error
+        console.log('Note: image_url column may already exist');
+      }
     }
+
+    // Create trigger function to update updated_at timestamp
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION update_updated_at_column()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        NEW.updated_at = CURRENT_TIMESTAMP;
+        RETURN NEW;
+      END;
+      $$ language 'plpgsql';
+    `);
+
+    // Create trigger for posts table
+    await pool.query(`
+      DROP TRIGGER IF EXISTS update_posts_updated_at ON posts;
+      CREATE TRIGGER update_posts_updated_at
+      BEFORE UPDATE ON posts
+      FOR EACH ROW
+      EXECUTE FUNCTION update_updated_at_column();
+    `);
+
+    // Create index on author_id for better query performance
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_posts_author_id ON posts(author_id)
+    `);
 
     console.log('✅ Database initialized successfully');
   } catch (error) {
     if (error.code === 'ECONNREFUSED') {
-      console.error('\n❌ ERROR: Cannot connect to MySQL database');
+      console.error('\n❌ ERROR: Cannot connect to PostgreSQL database');
       console.error('Possible reasons:');
-      console.error('  1. MySQL is not running on your machine');
+      console.error('  1. PostgreSQL is not running on your machine');
       console.error('  2. DATABASE_URL in .env file is incorrect');
       console.error('  3. Database server is not accessible');
       console.error('\nTo fix this:');
-      console.error('  - For local development: Start MySQL service');
       console.error('  - Check your .env file has the correct DATABASE_URL');
-      console.error('  - Format: mysql://username:password@host:port/database\n');
-    } else if (error.code === 'ER_ACCESS_DENIED_ERROR') {
-      console.error('\n❌ ERROR: Access denied to MySQL database');
+      console.error('  - Format: postgresql://username:password@host:port/database\n');
+    } else if (error.code === '28P01') {
+      console.error('\n❌ ERROR: Access denied to PostgreSQL database');
       console.error('Possible reasons:');
       console.error('  1. Incorrect password in DATABASE_URL');
       console.error('  2. User does not have permission to access the database');
-      console.error('  3. Special characters in password need to be URL-encoded');
       console.error('\nTo fix this:');
-      console.error('  - Verify your MySQL root password is correct');
-      console.error('  - If password contains special characters (@, #, %, etc.), URL-encode them:');
-      console.error('    @ becomes %40, # becomes %23, % becomes %25, etc.');
-      console.error('  - Example: mysql://root:my%40password@127.0.0.1:3306/blogpost');
-      console.error('  - Or try connecting with your MySQL client to verify credentials\n');
+      console.error('  - Verify your PostgreSQL credentials are correct');
+      console.error('  - Check that the database user has the necessary permissions\n');
     } else {
       console.error('❌ Error initializing database:', error.message);
     }
